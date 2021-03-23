@@ -1,0 +1,226 @@
+---
+title: "Cluster Analysis"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+## install and load necessary packages
+```{r}
+library(ggplot2)
+library(cluster)
+library(purrr)
+library(tidyverse)
+library(lubridate)
+library(zoo)
+library(corrplot)
+library("factoextra")
+library(MASS)
+```
+
+## now let's read the dataset
+```{r}
+data <- read.csv("marketing_data-2.csv")
+```
+
+
+```{r}
+#convert Income column to numeric
+data$Income <- as.numeric(gsub('[$,.00]', '', data$Income))
+
+#plug in medians for all NAs in Income column
+data[is.na(data[,5]), 5] <- median(data[,5], na.rm = TRUE)
+
+#convert Dt_customer to date format and create a column named tenure_customer, measuring customer tenure
+data$Dt_Customer <- as.Date(data$Dt_Customer, format = "%m/%d/%y")
+data <- data %>% mutate(tenure_customer = as.numeric(difftime(as.Date("2021-03-08"),data$Dt_Customer, 
+                 unit="weeks"))/52.25)
+```
+
+```{r}
+#remove outliers in Income and MntMeatProducts column
+plot(data$Income)
+data <- data[!(data$Income ==666666), ]
+plot(data$MntMeatProducts)
+data <- data[!(data$MntMeatProducts > 1400), ]
+#summary(data)
+```
+#some visualization to see the relationship between meat product/wines purchases and customers who accepted past campaign/how many deal purchased 
+```{r}
+boxplot(data$tenure_customer~data$Response)
+boxplot(data$MntMeatProducts~data$AcceptedCmp5)
+boxplot(data$MntMeatProducts~data$AcceptedCmp4)
+boxplot(data$MntMeatProducts~data$AcceptedCmp3)
+boxplot(data$MntWines~data$AcceptedCmp5)
+boxplot(data$MntWines~data$AcceptedCmp4)
+boxplot(data$MntWines~data$AcceptedCmp3)
+boxplot(data$MntMeatProducts~data$NumDealsPurchases)
+boxplot(data$MntMeatProducts~data$NumCatalogPurchases)
+boxplot(data$MntWines~data$NumDealsPurchases)
+boxplot(data$MntWines~data$NumCatalogPurchases)
+```
+
+```{r}
+#remove all non-numeric columns for kmeans
+dis_data <- data[, -c(2:4, 6:8, 21:28)]
+#dis_data
+#summary(dis_data)
+#str(dis_data)
+```
+```{r}
+#generate correlation plot and only show > 0.5/< -0.5 correlation
+corr <- cor(dis_data)
+corr[lower.tri(corr, diag = TRUE)] <- NA
+corr[corr = 1] <- 1
+corr <- as.data.frame(as.table(corr))
+corr <- na.omit(corr)
+
+corr <- subset(corr, abs(Freq) > 0.5)
+corr <- corr[order(-abs(corr$Freq)), ]
+
+#print(corr)
+
+corr <- corr[-1,]
+matrix_corr <- reshape2::acast(corr, Var1~Var2, value.var = "Freq")
+corrplot(matrix_corr, type="upper", method="number", is.corr = FALSE, tl.col = "black", na.label = " ")
+#number of web visit per month appears to be negatively correlated with amount of meat products purchased
+#while amount of meat purchased is positively correlated with amount of wine purchases.
+#looking at catalog purchases's positive correlation with wine and meat, it may warrant a catalog campaign
+#in the future, to boost wine and meat sales.
+```
+
+
+```{r}
+#standardize the data.frame to avoid unfair distance calculation in kmeans()
+sc_dis_data <- scale(dis_data[-1], center = TRUE, scale = TRUE)
+#sc_dis_data
+#summary(sc_dis_data) 
+#fourteen columns of standardized variables
+```
+
+```{r}
+#kmeans
+
+#use elbow method to find the k value that has the lowest total withins distance.
+
+tot.withinss <- map_dbl(1:10, function(k){
+  model <- kmeans(x=sc_dis_data, centers = k)
+  model$tot.withinss
+})
+tot.withinss
+
+elbow <- data.frame(k = 1:10, tot.withinss = tot.withinss)
+elbow
+```
+```{r}
+ggplot(data = elbow, aes(x = k, y = tot.withinss)) + geom_line() + scale_x_continuous(breaks = 1:10)
+```
+```{r}
+#three-cluster analysis
+set.seed(123)
+k3_clus <- kmeans(sc_dis_data, center = 3)
+#k3_clus
+#cbind cluster assignment to the non-standardize data.frame
+clus_dis_data <- cbind(dis_data, k3_clus$cluster)
+```
+
+```{r}
+#clus_dis_data
+#find the cluster mean for each column
+clus_dis_data[,-1] %>% group_by(k3_clus$cluster)%>% summarise_all(list(mean))
+#cluster 3 appears to be the highest income group, with most amount of meat and wine purchases, and number of catalog purchases
+```
+```{r}
+#visualize 3-cluster analysis
+
+fviz_cluster(k3_clus, data=clus_dis_data)
+```
+#cluster 3 (blue): high income, high consumption in wines, fruits, meat, gold, fish, sweet, less deal purchases, more catalog purchases(distinctive)
+#cluster 2 (green): average income, high wines consumptions(lower than cluster 1), high gold products, more deal purchases(no.1), web purchases/high web visits
+#cluster 1 (red): low income, low purchases across catrgories, most web visits/month but low web purchases.
+
+```{r}
+#use Sihouette analysis to evaluate the fit of three clusters
+
+pam_k3 <- pam(sc_dis_data, k = 3)
+
+#pam_k3$silinfo$widths: all silhouette width for each observation
+sil_plot <- silhouette(pam_k3)
+plot(sil_plot, border = NA)
+
+#since the average silhouette is 0.24 (1 being ideal), we will explore the average silhouette width for other numbers of cluster
+```
+```{r}
+m.deals <- lm(NumDealsPurchases ~ factor(k3_clus$cluster), data = clus_dis_data)
+summary(m.deals)
+```
+
+
+
+```{r}
+#explore average silhouette for other values of k
+
+sil_width <- map_dbl(2:10, function(k){
+  model <- pam(sc_dis_data, k = k)
+  model$silinfo$avg.width})
+
+sil_df <- data.frame(
+  k=2:10,
+  silh_width = sil_width
+)
+sil_df
+```
+
+```{r}
+#visualize silhouette widths for k =2 to k = 10
+ggplot(sil_df, aes(k, sil_width)) + geom_line() + scale_x_continuous(breaks = 2:10)
+```
+#According to the silhouette analysis, it appears that 2-cluster has the highest avearge silhouette width, indicating most observations are well matched to its assigned cluster (2 clusters). Although the average silhouette width for 2-cluster is higher than that of 3-cluster, a value of 0.24, which is relatively well above zero, still indicates most observations are well matched in the 3 assigned clusters. In that regards, we will proceed with both approaches and analyze the results.
+
+
+```{r}
+#Silhouette plot for k =2 
+
+pam_k2 <- pam(sc_dis_data, k = 2)
+#pam_k3$silinfo$widths: all silhouette width for each observation
+sil_plot2 <- silhouette(pam_k2)
+plot(sil_plot2, border = NA)
+```
+
+
+
+```{r}
+# 2-cluster analysis and visulaization
+set.seed(123)
+k2_clus <- kmeans(sc_dis_data, centers = 2)
+#k2_clus
+clus_dis_data2 <- cbind(dis_data, k2_clus$cluster)
+
+
+clus_dis_data2[,-1] %>% group_by(k2_clus$cluster)%>% summarise_all(list(mean))
+fviz_cluster(k2_clus, data=clus_dis_data2)
+
+```
+
+```{r}
+#clus_dis_data2
+```
+```{r}
+t.test(MntMeatProducts~k2_clus$cluster, data = clus_dis_data2)
+
+clus_aov <- aov(MntMeatProducts~k2_clus$cluster, data = clus_dis_data2)
+anova(clus_aov)
+```
+#here we use t.test to test the group mean of MntMeatProducts as well as a analysis of variance to see if cluster assignment is a factor related to the difference in mean MntMeatProducts between cluster. Both tests turn out to be statistically significant with low p-values (lower than 0.05), meaning that the mean purchases in meat products vary beween the two clusters and the cluster assignment is related to the different amount of meat purchases. 
+```{r}
+m.meat <- lm(MntMeatProducts ~ factor(k2_clus$cluster) + NumCatalogPurchases, data = clus_dis_data2)
+summary(m.meat)
+```
+
+
